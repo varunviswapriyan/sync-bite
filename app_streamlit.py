@@ -2,138 +2,10 @@ import os, math, re, json
 from datetime import time, datetime
 import pandas as pd, requests, streamlit as st
 import numpy as np
-
-import json, re, os
 from openai import OpenAI
 
-def fetch_menu(name: str, meal: str, date):
-    """
-    Robustly fetch and normalize a structured menu via OpenAI.
-    Guarantees the returned dict has keys: provider, meal, items (list).
-    """
-    # Fallback skeleton we will *always* return at minimum
-    def skeleton(items=None, err=None):
-        return {
-            "provider": name,
-            "meal": meal,
-            "items": items if isinstance(items, list) else ([] if err else [{"category": "Menu", "options": []}]),
-            **({"error": str(err)} if err else {})
-        }
-
-    try:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            return skeleton(err="Missing OPENAI_API_KEY")
-
-        client = OpenAI(api_key=api_key)
-
-        prompt = f"""
-Return ONLY valid JSON for a realistic {meal} menu for "{name}" near OSU.
-Format:
-{{
-  "provider": "{name}",
-  "meal": "{meal}",
-  "items": [
-    {{
-      "category": "Entrées",
-      "options": [
-        {{"name": "Item", "description": "Short desc", "price": 8.5}}
-      ]
-    }}
-  ]
-}}
-Use 3–5 categories; each 3–5 options; prices as numbers.
-"""
-
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0.6,
-            messages=[
-                {"role": "system", "content": "You output valid JSON only. No commentary."},
-                {"role": "user", "content": prompt},
-            ],
-        )
-
-        raw = (resp.choices[0].message.content or "").strip()
-
-        # Strip code fences if present
-        if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE)
-
-        # Extract the largest JSON object if the model added stray text
-        if not (raw.startswith("{") and raw.endswith("}")):
-            m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-            raw = m.group(0) if m else raw
-
-        data = json.loads(raw)
-
-        # ---- Normalize to guaranteed schema ----
-        # If model returned a list, wrap as items
-        if isinstance(data, list):
-            data = {"items": data}
-
-        # Force provider/meal
-        data.setdefault("provider", name)
-        data.setdefault("meal", meal)
-
-        # Normalize items to a list of categories with options
-        items = data.get("items", [])
-        if not isinstance(items, list):
-            items = []
-
-        # Case: model returned flat options instead of categories
-        # Make a single category if needed.
-        normalized_items = []
-        for cat in items:
-            if not isinstance(cat, dict):
-                continue
-            category = cat.get("category")
-            options = cat.get("options")
-            # If looks like an option row list, wrap it
-            if isinstance(options, list):
-                normalized_items.append({
-                    "category": category or "Menu",
-                    "options": [
-                        {
-                            "name": o.get("name", ""),
-                            "description": o.get("description", ""),
-                            "price": float(o.get("price", 0)) if isinstance(o.get("price", 0), (int, float, str)) else 0.0
-                        }
-                        for o in options if isinstance(o, dict)
-                    ]
-                })
-            else:
-                # If cat itself looks like an option, coerce
-                if "name" in cat:
-                    normalized_items.append({
-                        "category": category or "Menu",
-                        "options": [{
-                            "name": cat.get("name", ""),
-                            "description": cat.get("description", ""),
-                            "price": float(cat.get("price", 0)) if isinstance(cat.get("price", 0), (int, float, str)) else 0.0
-                        }]
-                    })
-
-        # If still empty, return a minimal placeholder
-        if not normalized_items:
-            normalized_items = [{
-                "category": "Menu",
-                "options": [
-                    {"name": "Chef’s Special", "description": "House favorite.", "price": 9.5},
-                    {"name": "Seasonal Bowl", "description": "Fresh and fast.", "price": 8.0},
-                ],
-            }]
-
-        data["items"] = normalized_items
-        return data
-
-    except Exception as e:
-        return skeleton(err=e)
-
-# =====================================================
-# Basic setup + helpers (unchanged)
-# =====================================================
-st.set_page_config(page_title="SyncBite –  AI-Powered Meal Planner", layout="wide")
+#UI Stuff 
+st.set_page_config(page_title="SyncBite – AI-Powered Meal Planner", layout="wide")
 st.title("SyncBite")
 
 if "friends" not in st.session_state: st.session_state.friends = []
@@ -147,23 +19,32 @@ OSU_OVAL = (40.0076,-83.0148)
 OSU_BBOX = [40.0005,-83.0265,40.0188,-82.9965]
 CROWD_MAP = {"Low":5,"Medium":15,"High":30}
 
+#Getting location with ip address, get real API in future
 def get_user_location():
     try:
-        j = requests.get("https://ipinfo.io/json",timeout=5).json()
-        if "loc" in j: return tuple(map(float,j["loc"].split(",")))
-    except Exception: pass
+        j = requests.get("https://ipinfo.io/json", timeout=5).json()
+        if "loc" in j:
+            return tuple(map(float, j["loc"].split(",")))
+    except Exception:
+        pass
     return OSU_OVAL
-
+#Location distance finding
 def haversine_km(a,b):
-    R=6371; lat1,lon1=map(math.radians,a); lat2,lon2=map(math.radians,b)
+    R=6371
+    lat1,lon1=map(math.radians,a)
+    lat2,lon2=map(math.radians,b)
     dlat,dlon=lat2-lat1,lon2-lon1
     h=math.sin(dlat/2)**2+math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
     return 2*R*math.asin(math.sqrt(h))
 
 def default_availability():
-    return pd.DataFrame({"Day":DAYS,"Available":[False]*7,
-                         "Start":[time(12,0)]*7,"End":[time(20,0)]*7})
-
+    return pd.DataFrame({
+        "Day":DAYS,
+        "Available":[False]*7,
+        "Start":[time(12,0)]*7,
+        "End":[time(20,0)]*7
+    })
+#UI opening hours stuff
 def parse_opening_hours_basic(oh,idx):
     if not oh or not isinstance(oh,str): return []
     token=["Mo","Tu","We","Th","Fr","Sa","Su"][idx]
@@ -176,18 +57,22 @@ def parse_opening_hours_basic(oh,idx):
                 s=time(int(m[0].split(":")[0]),int(m[0].split(":")[1]))
                 e=time(int(m[1].split(":")[0]),int(m[1].split(":")[1]))
                 wins.append((s,e))
-            except: continue
+            except:
+                continue
     return wins
 
 def is_open_at(oh,idx,t):
     try:
         for s,e in parse_opening_hours_basic(oh,idx):
-            if s<=t<e: return True
-    except: pass
+            if s<=t<e:
+                return True
+    except:
+        pass
     return False
 
 def estimate_wait(c): return CROWD_MAP.get(c,10)
 
+#Need to check common friends availabilities with the dataset
 def get_common_availability(avail_dict,sel):
     dfs=[avail_dict[f][avail_dict[f]["Available"]] for f in sel if f in avail_dict]
     if not dfs: return []
@@ -200,14 +85,10 @@ def get_common_availability(avail_dict,sel):
             if s<e: merged.append((d,s,e))
     return merged
 
-# =====================================================
-# Tabs
-# =====================================================
+#3 tabs for the app
 tab1, tab2, tab3 = st.tabs(["👥 Manage Friends", "🍴 Find OSU Restaurants", "🤖 Find Best Meal Spot + AI Menu"])
 
-# =====================================================
-# TAB 1: Manage Friends
-# =====================================================
+#Managing our friends, adding/removing friends
 with tab1:
     st.header("Add / Remove Friends")
     c1,c2=st.columns([2,1])
@@ -226,8 +107,10 @@ with tab1:
                 st.session_state.availability[n]=default_availability()
                 st.success(f"Added {n}")
                 st.rerun()
-            else: st.warning("Invalid or duplicate name.")
+            else:
+                st.warning("Invalid or duplicate name.")
 
+    #Option to update friends' schedules (dataframe)
     st.divider()
     st.header("Manage Friends' Schedules")
     if not st.session_state.friends:
@@ -241,11 +124,10 @@ with tab1:
                            "Start":st.column_config.TimeColumn(format="HH:mm"),
                            "End":st.column_config.TimeColumn(format="HH:mm")})
         if st.button("Save Schedule"):
-            st.session_state.availability[f]=nd; st.success("Saved!")
+            st.session_state.availability[f]=nd
+            st.success("Saved!")
 
-# =====================================================
-# TAB 2: Find OSU Restaurants
-# =====================================================
+#Openpass API to get OSU restaurants close by (expand this to beyond OSU in future)
 with tab2:
     st.header("Find OSU Restaurants")
     if not st.session_state.user_latlon:
@@ -285,12 +167,12 @@ with tab2:
             df=fetch_osu_restaurants()
             st.session_state.restaurants_df=df
             st.success(f"Loaded {len(df)} restaurants near campus.")
-
+    #Outputting restuaraunt details for each one
     if st.session_state.restaurants_df is not None:
         df = st.session_state.restaurants_df.copy()
         st.dataframe(df[["Name","Cuisine","Opening Hours","Distance (km)"]],
                      use_container_width=True, hide_index=True)
-
+    #Getting user input for optimization algo
         st.subheader("Edit Restaurant Ratings / Crowd Levels / Wait Times")
         with st.form("edit_restaurant", clear_on_submit=False):
             rname = st.selectbox("Select restaurant", df["Name"].tolist())
@@ -298,7 +180,7 @@ with tab2:
             crowd = st.selectbox("Crowd Level", ["Low","Medium","High"])
             wait = st.number_input("Expected Wait (min)", min_value=0, max_value=180, step=1, value=15)
             submitted = st.form_submit_button("Save")
-
+    
         if submitted:
             df.loc[df["Name"]==rname, "Your Rating"] = rating
             wl = st.session_state.global_wait_data.get(rname, [])
@@ -311,9 +193,7 @@ with tab2:
             st.session_state.restaurants_df = df
             st.success(f"Updated {rname}. Avg wait now {avg_wait} min.")
 
-# =====================================================
-# TAB 3: Find Best Lunch Spot + Menu
-# =====================================================
+#Optimization + best meal optimization
 with tab3:
     st.header("Find Best Meal Spot and Menu Suggestion")
     if not st.session_state.friends or st.session_state.restaurants_df is None:
@@ -336,7 +216,7 @@ with tab3:
                 w_rating=st.slider("Weight: Rating",0.0,1.0,0.5,0.05)
                 w_wait=st.slider("Weight: Wait Time",0.0,1.0-w_rating,0.3,0.05)
                 w_dist=1.0-w_rating-w_wait
-
+                #Algo integrating restaurant info+ user info + input weigths to predict best location
                 if st.button("🔍 Find the Best Place"):
                     df=st.session_state.restaurants_df.copy()
                     idx=DAYS.index(day)
@@ -346,7 +226,8 @@ with tab3:
                         st.warning("No open restaurants at that time.")
                     else:
                         def normalize(series):
-                            if series.max() == series.min(): return np.random.uniform(0.4,0.6,len(series))
+                            if series.max() == series.min():
+                                return np.random.uniform(0.4,0.6,len(series))
                             return (series-series.min())/(series.max()-series.min())
 
                         df["Your Rating"] = df["Your Rating"].replace(0,2.5)
@@ -370,9 +251,6 @@ with tab3:
                         with st.spinner("Generating menu..."):
                             menu=fetch_menu(best["Name"],"lunch" if 10<=start.hour<16 else "dinner",datetime.now().date())
 
-                        menu = fetch_menu(best["Name"], "lunch" if 10 <= start.hour < 16 else "dinner", datetime.now().date())
-
-# 🔍 Debug line
                         if "error" in menu:
                             st.error(f"OpenAI menu generation failed: {menu['error']}")
 
@@ -382,3 +260,105 @@ with tab3:
                             st.markdown(f"#### {cat.get('category', 'Menu')}")
                             for opt in cat.get("options", []):
                                 st.markdown(f"- **{opt.get('name','')}** — {opt.get('description','')} ${opt.get('price','')}")
+
+#LLM call using openAI to get the actual menu of optimal locaiton
+def fetch_menu(name: str, meal: str, date):
+    """
+    Robustly fetch and normalize a structured menu via OpenAI.
+    Guarantees the returned dict has keys: provider, meal, items (list).
+    """
+    def skeleton(items=None, err=None):
+        return {
+            "provider": name,
+            "meal": meal,
+            "items": items if isinstance(items, list) else ([] if err else [{"category": "Menu", "options": []}]),
+            **({"error": str(err)} if err else {})
+        }
+
+    try:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return skeleton(err="Missing OPENAI_API_KEY")
+
+        client = OpenAI(api_key=api_key)
+
+        prompt = f"""
+Return ONLY valid JSON for a realistic {meal} menu for "{name}" near OSU.
+Format:
+{{
+  "provider": "{{{{name}}}}",
+  "meal": "{{{{meal}}}}",
+  "items": [
+    {{
+      "category": "Entrées",
+      "options": [
+        {{"name": "Item", "description": "Short desc", "price": 8.5}}
+      ]
+    }}
+  ]
+}}
+Use 3–5 categories; each 3–5 options; prices as numbers.
+"""
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.6,
+            messages=[
+                {"role": "system", "content": "You output valid JSON only. No commentary."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+        raw = (resp.choices[0].message.content or "").strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE)
+        if not (raw.startswith("{") and raw.endswith("}")):
+            m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            raw = m.group(0) if m else raw
+        data = json.loads(raw)
+        if isinstance(data, list):
+            data = {"items": data}
+        data.setdefault("provider", name)
+        data.setdefault("meal", meal)
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        normalized_items = []
+        for cat in items:
+            if not isinstance(cat, dict): continue
+            category = cat.get("category")
+            options = cat.get("options")
+            if isinstance(options, list):
+                normalized_items.append({
+                    "category": category or "Menu",
+                    "options": [
+                        {
+                            "name": o.get("name", ""),
+                            "description": o.get("description", ""),
+                            "price": float(o.get("price", 0)) if isinstance(o.get("price", 0), (int, float, str)) else 0.0
+                        }
+                        for o in options if isinstance(o, dict)
+                    ]
+                })
+            elif "name" in cat:
+                normalized_items.append({
+                    "category": category or "Menu",
+                    "options": [{
+                        "name": cat.get("name", ""),
+                        "description": cat.get("description", ""),
+                        "price": float(cat.get("price", 0)) if isinstance(cat.get("price", 0), (int, float, str)) else 0.0
+                    }]
+                })
+        if not normalized_items:
+            normalized_items = [{
+                "category": "Menu",
+                "options": [
+                    {"name": "Chef’s Special", "description": "House favorite.", "price": 9.5},
+                    {"name": "Seasonal Bowl", "description": "Fresh and fast.", "price": 8.0},
+                ],
+            }]
+        data["items"] = normalized_items
+        return data
+    except Exception as e:
+        return skeleton(err=e)
+
